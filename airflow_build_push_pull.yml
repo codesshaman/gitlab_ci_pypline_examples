@@ -1,0 +1,87 @@
+stages:
+  - ssh
+  - build
+  - deploy
+  - start
+
+.ssh-setyings-up: &ssh_setup
+  stage: ssh
+  before_script:
+    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -t rsa $VM_CLICKHOUSE_PORT > ~/.ssh/known_hosts
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - chmod 644 ~/.ssh/known_hosts
+
+build:
+  stage: build
+  script:
+    - echo "Собираем новый образ"
+    - docker build --no-cache -t ${CI_REGISTRY_IMAGE}:latest -t ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} .
+    - echo "Пушим образ в репозиторий"
+    - docker push ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} > /dev/null
+  rules:
+    - exists:
+      - docker-compose.yml
+    - changes:
+      - merge_requests
+    - changes:
+      - master
+  tags:
+    - airflow, dp
+
+deploy:
+  <<: *ssh_setup
+  stage: deploy
+  script:
+    - echo "Осуществляем авторизацию в registry"
+    - ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - echo "Собираем информацию о предыдущем образе"
+    - OLD_AIRFLOW_IMAGE_NAME=$(ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "docker images | grep ${CI_REGISTRY_IMAGE} | head -n 1 | awk '{print \$1}'")
+    - OLD_AIRFLOW_IMAGE_TAG=$(ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "docker images | grep ${CI_REGISTRY_IMAGE} | head -n 1 | awk '{print \$2}'")
+    - OLD_AIRFLOW_IMAGE=${OLD_AIRFLOW_IMAGE_NAME}:${OLD_AIRFLOW_IMAGE_TAG}
+    - echo "Имя старого образа получено, загружаем новый образ"
+    - ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "docker pull ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+    - echo "Новый образ успешно загружен, удаляем старый"
+    - OLD_CONTAINERS=$(ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT 'docker ps --filter ancestor=${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} -q')
+    - if [ -n "$OLD_CONTAINERS" ]; then ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT 'docker stop $OLD_CONTAINERS'; fi
+    - if [ -n "$OLD_CONTAINERS" ]; then ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT 'docker rm $OLD_CONTAINERS'; fi
+    - echo "Контейнеры старого образа остановлены"
+    - if [ -n "$OLD_AIRFLOW_IMAGE" ]; then ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "docker image rm --force ${OLD_AIRFLOW_IMAGE}"; fi
+    - echo "Удаление старого образа прошло успешно"
+  rules:
+    - exists:
+      - docker-compose.yml
+    - changes:
+      - merge_requests
+    - changes:
+      - master
+  dependencies:
+    - build
+  tags:
+    - airflow, dp
+
+start:
+  <<: *ssh_setup
+  stage: start
+  script:
+    - echo "Передаю файла docker-compose.yml на сервер"
+    - scp docker-compose.yml $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT:/home/$VM_CLICKHOUSE_USER/airflow/docker-compose.yml
+    - echo "Задаю переменную окружения и запускаю билд"
+    - ssh $VM_CLICKHOUSE_USER@$VM_CLICKHOUSE_PORT "export SELFMADE_AIRFLOW_IMAGE=${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} && docker-compose -f /home/$VM_CLICKHOUSE_USER/airflow/docker-compose.yml up -d"
+    - echo "Сборка успещно завершена, пайплайн выполнен!"
+  rules:
+    - exists:
+      - docker-compose.yml
+    - changes:
+      - merge_requests
+    - changes:
+      - master
+  dependencies:
+    - deploy
+  tags:
+    - airflow, dp

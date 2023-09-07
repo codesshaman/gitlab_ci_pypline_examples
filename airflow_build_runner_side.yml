@@ -1,0 +1,50 @@
+stages:
+  - build
+  - start
+
+variables:
+  GIT_DEPTH: full
+
+build:
+  stage: build
+  # before_script:  # На случай ошибки: Reinitialized existing Git repository
+  #   - cd ~ $$ rm -rf ./buijlds # fatal: git fetch-pack: expected shallow list
+  script:
+    - echo "Собираем новый образ"
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build --no-cache -t ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} .
+    - echo "Пушим образ в репозиторий"
+    - docker push ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} > /dev/null
+    # Если понадобится авторизация при пуше:
+    #- docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY && docker push ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA} > /dev/null
+  rules:
+    - exists:
+      - docker-compose.yml
+    - changes:
+      - merge_requests
+    - changes:
+      - master
+  tags:
+    - vm-lin-clickhouse
+
+start:
+  stage: start
+  image: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+  script:
+    - |-
+      sudo su - $VM_CLICKHOUSE_USER -c "
+        export SELFMADE_AIRFLOW_IMAGE=${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+        cd /home/$VM_CLICKHOUSE_USER/airflow
+        docker-compose down && docker-compose up -d && docker-compose ps
+        echo y | docker system prune -a
+        docker images
+      "
+  rules:
+    - exists:
+      - docker-compose.yml
+    - changes:
+      - merge_requests
+    - changes:
+      - master
+  tags:
+    - vm-lin-clickhouse
