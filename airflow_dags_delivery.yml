@@ -1,0 +1,58 @@
+stages:
+  - setup
+  - zip
+  - public
+
+variables:
+  GIT_DEPTH: full
+
+.ssh-setyings-up: &zip_setup
+  stage: setup
+  before_script:
+    - sudo yum install zip unzip -y
+
+zip:
+  <<: *zip_setup
+  stage: zip
+  script:
+    - |
+      if test -d ./artifacts; then
+        if test -f artifacts/archive.zip; then
+          rm ./artifacts/archive.zip
+        fi
+        echo "Создаю архив"
+      else
+        mkdir artifacts
+        echo "Создаю архив"
+      fi
+      if test -d ./newdags; then
+        rm -rf ./newdags
+      fi
+      if test -d ./newscripts; then
+        rm -rf ./newscripts
+      fi
+      cp -rf dags newdags
+      cp -rf scripts newscripts
+      zip -r artifacts/archive.zip newdags newscripts
+  artifacts:
+    paths:
+      - artifacts/archive.zip
+  tags:
+    - airflow_dags
+
+public:
+  stage: public
+  script:
+    - echo "Копирую папку dags пользвателю"
+    - sudo cp ./artifacts/archive.zip /home/$DEPLOY_USER/airflow
+    - sudo chown $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/airflow/archive.zip
+    - |-
+      sudo su - $DEPLOY_USER -c "
+        cd /home/$DEPLOY_USER/airflow
+        rm -rf newdags newscripts || true
+        unzip archive.zip
+        rm archive.zip
+      "
+    - echo "Пайплайн успешно выполнен!" 
+  tags:
+    - dags
